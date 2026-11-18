@@ -2,6 +2,7 @@ import argparse
 import shutil
 from pathlib import Path
 import sys
+import logging
 
 EXTENSION_CATEGORIES = {
     # Documents
@@ -50,7 +51,7 @@ EXTENSION_CATEGORIES = {
     ".json": "Code",
     ".java": "Code",
     ".cpp": "Code",
-}
+}#all types of extensions
 
 
 def main():
@@ -73,19 +74,21 @@ def main():
     if args.apply:
         confirmed = confirm_org()
         if confirmed:
-            apply_plan(org_plan)
+            setup_logging(target_dir)
+            info = apply_plan(org_plan)
+            display_summary(info)
         else:
             print("Organisation cancelled. No files were moved.")
 
 
-def validate_directory(path):
+def validate_directory(path): #validates whether the path exists and relevant
     path = Path(path)
     if path.exists() and path.is_dir():
         return path
     return None
 
 
-def scan_directory(target_dir):
+def scan_directory(target_dir): #scans if the files are plausible
     files = []
     for entry in target_dir.iterdir():
         if entry.is_symlink():
@@ -98,14 +101,14 @@ def scan_directory(target_dir):
     return files
 
 
-def classify_file(file):
+def classify_file(file):#classifies files into extensions
     extension = file.suffix
     lower_extension = extension.lower()
     category = EXTENSION_CATEGORIES.get(lower_extension, "Others")
     return category
 
 
-def create_organization_plan(target_dir, eligible_files):
+def create_organization_plan(target_dir, eligible_files):#plans out organization of files
     org_plan = []
     reserved_destinations = set()
 
@@ -140,7 +143,7 @@ def create_organization_plan(target_dir, eligible_files):
     return org_plan
 
 
-def display_plan(org_plan):
+def display_plan(org_plan): #displays plan for user input
     if not org_plan:
         print("No eligible files found")
         return
@@ -155,7 +158,7 @@ def display_plan(org_plan):
     print(f"\n{len(org_plan)} files planned.")
 
 
-def confirm_org():
+def confirm_org():#user input
     while True:
         answer = input("Are you sure you want to proceed? [y/N]: ").strip().lower()
         if answer == "y":
@@ -166,47 +169,136 @@ def confirm_org():
             print("Invalid input. Please enter y or n.")
 
 
-def apply_plan(org_plan):
+def apply_plan(org_plan):#applies the plan when user input is yes
+    moved = 0
+    skipped = 0
+    failed = 0
+
     for plan in org_plan:
         source = plan["source"]
         destination = plan["destination"]
         destination_folder = destination.parent
 
         try:
-            # Reject directory symlinks and Windows junctions before using them.
-            is_junction = getattr(destination_folder, "is_junction", lambda: False)()
+            # Reject directory symlinks and Windows junctions.
+            is_junction = getattr(
+                destination_folder, "is_junction", lambda: False
+            )()
+
             if destination_folder.is_symlink() or is_junction:
-                print(f"Skipping {source.name}: destination folder is a symbolic link or junction.")
+                print(
+                    f"Skipping {source.name}: destination folder "
+                    "is a symbolic link or junction."
+                )
+                logging.warning(
+                    "Skipped %s: destination folder is a link or junction",
+                    source.name
+                )
+                skipped += 1
                 continue
 
-            # A regular file at the category-folder path cannot receive files.
+            # Reject a regular file occupying the category-folder path.
             if destination_folder.exists() and not destination_folder.is_dir():
-                print(f"Skipping {source.name}: destination folder path is occupied by a file.")
+                print(
+                    f"Skipping {source.name}: destination folder "
+                    "path is occupied by a file."
+                )
+                logging.warning(
+                    "Skipped %s: destination folder path is occupied by a file",
+                    source.name
+                )
+                skipped += 1
                 continue
 
-            # Resolve and verify the destination folder stays inside the selected root.
+            # Ensure the destination folder stays inside the selected directory.
             target_root = source.parent.resolve()
             resolved_destination_folder = destination_folder.resolve()
+
             try:
                 resolved_destination_folder.relative_to(target_root)
             except ValueError:
-                print(f"Skipping {source.name}: destination resolves outside the selected directory.")
+                print(
+                    f"Skipping {source.name}: destination resolves "
+                    "outside the selected directory."
+                )
+                logging.warning(
+                    "Skipped %s: destination resolves outside selected directory",
+                    source.name
+                )
+                skipped += 1
                 continue
 
-            # Create a missing category folder only after confirmation.
+            # Create the category folder after confirmation.
             if not destination_folder.exists():
                 destination_folder.mkdir()
 
-            # exists() is False for a dangling symlink, so also check is_symlink().
+            # Reject an existing destination, including dangling symlinks.
             if destination.exists() or destination.is_symlink():
-                print(f"Skipping {source.name}: destination already exists or is a symbolic link.")
+                print(
+                    f"Skipping {source.name}: destination already exists "
+                    "or is a symbolic link."
+                )
+                logging.warning(
+                    "Skipped %s: destination already occupied",
+                    source.name
+                )
+                skipped += 1
                 continue
 
+            # Move the file.
             shutil.move(str(source), str(destination))
-            print(f"Moved {source.name} to {destination.parent.name}/{destination.name}")
+
+            moved += 1
+
+            logging.info(
+                "Moved %s to %s",
+                source.name,
+                destination
+            )
+
+            print(
+                f"Moved {source.name} to "
+                f"{destination.parent.name}/{destination.name}"
+            )
 
         except (OSError, shutil.Error) as error:
+            failed += 1
+
+            logging.error(
+                "Failed to move %s: %s",
+                source.name,
+                error
+            )
+
             print(f"Failed to move {source.name}: {error}")
+
+    return {
+        "moved": moved,
+        "skipped": skipped,
+        "failed": failed
+    }
+
+
+
+def setup_logging(target_dir): #sets up logging
+    n = target_dir / ".downloads-organizer.log"
+    logging.basicConfig(
+
+    filename=str(n),
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+
+def display_summary(info):#displays the final summary
+    print("\nOrganisation complete.")
+    print("---------------------")
+    print(f"Files moved:   {info['moved']}")
+    print(f"Files skipped: {info['skipped']}")
+    print(f"Files failed:  {info['failed']}")
+    print("---------------------")
+
+
 
 
 if __name__ == "__main__":
